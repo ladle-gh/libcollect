@@ -51,6 +51,8 @@ export void __coll_dtor(void);
  * Terminates program if coll_init() has not been called beforehand */
 #define coll_queue(block)   coll_dqueue(block, __coll_blank)
 
+BEGIN
+
 /* Queues freeing of memory block once the calling function returns
  * Returns pointer queued memory
  * Calls destructor function with memory block as argument before freeing
@@ -62,6 +64,8 @@ export void *coll_dqueue(void *block, void (*destructor)(void *)) noexcept pure;
 /* Prevents queued memory block from being freed once the calling function returns
  * If NULL is passed or if block has not been queued, no action is taken */
 export void *coll_unqueue(void *block) noexcept;
+
+END
 
 #include <ladle/common/end_header.h>
 #endif  // #ifndef LADLE_COLLECT_H
