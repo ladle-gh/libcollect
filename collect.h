@@ -2,53 +2,54 @@
 #define LADLE_COLLECT_H
 #include <errno.h>
 #include <stdbool.h>
-#include <stdnoreturn.h>
 #include <threads.h>
 
-#include <ladle/common/defs.h>
+#include <ladle/common/header.h>
 
 // ---- Implementation-Exclusive ----
 
-typedef void (*dtor_t)(void *);
+export extern thread_local void *__coll_cur;
 
-typedef struct gc_t {
-    void **queue;
-    dtor_t *dtors;
-    size_t capacity, count;
-    bool init;
-} gc_t;
-
-extern thread_local gc_t *local;
-
-noreturn void __coll_abort(void);
-bool __coll_ctor(void);
-void __coll_dtor(void);
+export void __coll_blank(void *block);
+export bool __coll_ctor(void);
+export void __coll_dtor(void);
 
 // ---- End Implementation-Exclusive ----
 
 /* Creates a new, function-local garbage collector
+ * __VA_ARGS__ is the list of parameter variables
  * Sets errno accordingly on internal error */
-#define coll_init(type, function, ...)                  \
-    if ((!local || !local->init) && __coll_ctor()) {    \
-        type __retval = function(__VA_ARGS__);          \
-        __coll_dtor();                                  \
-        return __retval;                                \
+#define coll_init(type, function, ...)              \
+    if (function != __coll_cur && __coll_ctor()) {  \
+        __coll_cur = function;                      \
+        type __retval = function(__VA_ARGS__);      \
+        __coll_dtor();                              \
+        return __retval;                            \
+    }
+#define coll_nrinit(function, ...)                  \
+    if (function != __coll_cur && __coll_ctor()) {  \
+        __coll_cur = function;                      \
+        function(__VA_ARGS__);                      \
+        __coll_dtor();                              \
+        return;                                     \
     }
 
-#define coll_init_nr(function, ...)                     \
-    if ((!local || !local->init) && __coll_ctor()) {    \
-        function(__VA_ARGS__);                          \
-        __coll_dtor();                                  \
-        return;                                         \
-    }
+// Returns specified value on internal error
+#define coll_einit(type, function, error, ...)  \
+    coll_init(type, function, __VA_ARGS__);     \
+    if (errno)  return (error);
+
+// Returns in internal error
+#define coll_enrinit(function, ...)     \
+    coll_nrinit(function, __VA_ARGS__)  \
+    if (errno)  return;
 
 /* Queues freeing of memory block once the calling function returns
  * Returns pointer queued memory
  * If NULL is passed, no action is taken
  * Returns NULL on internal error
  * Terminates program if coll_init() has not been called beforehand */
-void *coll_queue(void *block)
-attribute(nothrow, pure);
+#define coll_queue(block)   coll_dqueue(block, __coll_blank)
 
 /* Queues freeing of memory block once the calling function returns
  * Returns pointer queued memory
@@ -56,13 +57,11 @@ attribute(nothrow, pure);
  * If block is NULL, destructor must be able to handle such a case
  * Returns NULL on internal error
  * Terminates program if coll_init() has not been called beforehand */
-void *coll_dqueue(void *block, dtor_t destructor)
-attribute(nothrow, pure);
+export void *coll_dqueue(void *block, void (*destructor)(void *)) noexcept pure;
 
 /* Prevents queued memory block from being freed once the calling function returns
  * If NULL is passed or if block has not been queued, no action is taken */
-void coll_unqueue(void *block)
-attribute(nothrow);
+export void *coll_unqueue(void *block) noexcept;
 
-#include <ladle/common/undefs.h>
+#include <ladle/common/end_header.h>
 #endif  // #ifndef LADLE_COLLECT_H

@@ -1,65 +1,85 @@
-#include <errno.h>
+#include <limits.h>
+#include <stdalign.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <stdnoreturn.h>
 #include <string.h>
 #include <threads.h>
 
+#include <ladle/common/impl.h>
+#include <ladle/common/ptrcmp.h>
+
 #include "collect.h"
-
-// TODO implement BST
-
-// ---- Macros ----
-
-/* Ensures that if maximum count reached, expand block and destructor buffer
- * If block to be queued is a duplicate, returns block
- * Causes calling function to return NULL on internal error */
-#define validate_local(block)                                                   \
-    if (local->count == local->capacity) {                                      \
-        local->queue =                                                          \
-          realloc(local->queue, (local->capacity *= 2) * sizeof(void *));       \
-        if (!local->queue) {    /* realloc() fails (handles memory overflow) */ \
-            free(local->dtors);                                                 \
-            return NULL;                                                        \
-        }                                                                       \
-        local->dtors = realloc(local->dtors, local->capacity * sizeof(dtor_t)); \
-        if (!local->dtors) {    /* realloc() fails (handles memory overflow) */ \
-            free(local->queue);                                                 \
-            return NULL;                                                        \
-        }                                                                       \
-    }                                                                           \
-    for (size_t i = 0; i < local->count; ++i) {                                 \
-        if ((block) == local->queue[i])                                         \
-            return (block);                                                     \
-    }
 
 // ---- Constants ----
 
-#define LOCAL_DEF_CAP   4
-#define GLOBL_DEF_CAP   8
+#define QUEUE_DEFCAP    4
+#define STACK_DEFCAP    8
 
 // ---- Globals ----
 
+typedef void (*dtor_t)(void *);
+typedef struct entry_t {
+    void *block;
+    dtor_t dtor;
+} entry_t;
+typedef struct gc_t {
+    entry_t *queue;
+    size_t capacity, count, sorted;
+} gc_t;
+
+thread_local void *__coll_cur;
 thread_local gc_t *stack, *local;
 thread_local size_t capacity, depth;
 
 // ---- Private Functions ----
 
+// Function passed to qsort() when a block is unqueued
+static int cmpfunc(const void *a, const void *b) {
+    return ptr_gt(*(void **) a, *(void **) b) - ptr_lt(*(void **) a, *(void **) b);
+}
+
+/* Modified interpolation search
+ * Returns pointer to closest match of entry */
+static entry_t *qsearch(entry_t *min, entry_t *max, void *block) {
+    entry_t *cur;
+    void *minb, *maxb;
+
+    for (;;) {
+        minb = min->block;
+        maxb = max->block;
+        if (ptr_lt(block, minb))
+            return min;
+        if (ptr_gt(block, maxb))
+            return max;
+        cur = min + (uintptr_t) (((double)
+          (block - minb) / (maxb - minb) + !(maxb - minb)) * (max - min));
+        if (ptr_eq(cur->block, block))
+            return cur;
+        if (ptr_gt(cur->block, block)) {
+            max = cur - 1;
+            ++min;
+        } else {
+            min = cur + 1;
+            --max;
+        }
+    }
+}
+
 // Destructor that does nothing
-static void blank_dtor(void *block) {}
+void __coll_blank(void *restrict block) {}
 
 /* Prepares local collector for use
  * Allocates memory for contents of local collector, and initially, the local buffer
  * Returns true on success and false on failure */
 bool __coll_ctor(void) {
-    // If global collector not initialized, initialize
+    // If collector stack not initialized, initialize
     if (!depth) {
-        stack = malloc((capacity = GLOBL_DEF_CAP) * sizeof(gc_t));
+        stack = malloc((capacity = STACK_DEFCAP) * sizeof(gc_t));
         if (!stack) // malloc() fails
             return false;
-        local = stack;    
+        local = stack;
 
     // If maximum depth reached, expand local buffer
     } else if (++local && depth == capacity) {
@@ -70,21 +90,14 @@ bool __coll_ctor(void) {
     }
 
     // Initialize local queue
-    local->queue = malloc((local->capacity = LOCAL_DEF_CAP) * sizeof(void *));
+    local->queue = malloc((local->capacity = QUEUE_DEFCAP) * sizeof(entry_t));
     if (!local->queue) {    // malloc() fails
-        --depth;
+        if (!depth)
+            free(stack);
         return false;
     }
 
-    // Initialize local destructor buffer
-    local->dtors = malloc(local->capacity * sizeof(dtor_t));
-    if (!local->dtors) {
-        --depth;
-        return false;
-    }
-
-    local->init = true;
-    local->count = 0;
+    local->count = local->sorted = 0;
     ++depth;
     return true;
 }
@@ -92,41 +105,58 @@ bool __coll_ctor(void) {
 /* Frees memory queued to be freed
  * Frees contents of local collector, and intially, the local buffer */
 void __coll_dtor(void) {
+    entry_t cur;
+
     for (size_t i = 0, lim = local->count; i < lim; ++i) {
-        local->dtors[i](local->queue[i]);
-        free(local->queue[i]);
+        cur = local->queue[i];
+        cur.dtor(cur.block);
+        free(cur.block);
     }
-    free(local->queue);
-    free(local->dtors);
+    free((local--)->queue);
     if (!(--depth))
         free(stack);
 }
 
 // ---- Public Functions ----
 
-void *coll_queue(void *block) {
-    if (!depth || !local->init) {   // Local collector not initialized
-        puts("collect.h: Fatal error: Local collector not initialized");
-        exit(EXIT_FAILURE);
-    }
-    validate_local(block);
-    local->dtors[local->count] = blank_dtor;
-    return local->queue[local->count++] = block;
-}
 void *coll_dqueue(void *block, dtor_t destructor) {
-    if (!depth || !local->init) {   // Local collector not initialized
-        puts("collect.h: Fatal error: Local collector not initialized");
+    if (!depth) {
+        puts("collect.h: Fatal error: No local collector initialized");
         exit(EXIT_FAILURE);
     }
-    validate_local(block);
-    local->dtors[local->count] = destructor;
-    return local->queue[local->count++] = block;
-}
-void coll_unqueue(void *block) {
-    if (depth && local->init) {
-        for (size_t i = 0, lim = local->count; i < lim; ++i) {
-            if (block == local->queue[i])
-                local->queue[i] = NULL; // Causes free() to take no action
+    if (local->count) {
+        // Ensure that block is not already queued
+        if (local->sorted == local->count &&
+          qsearch(local->queue, local->queue + local->sorted - 1,
+          block)->block == block)
+            return block;
+        for (size_t i = local->sorted, lim = local->count; i < lim; ++i) {
+            if (block == local->queue[i].block)
+                return block;
         }
+
+        // If maximum capacity reached, expand queue
+        if (local->count == local->capacity) {
+            local->queue =
+              realloc(local->queue, (local->capacity *= 2) * sizeof(entry_t));
+            if (!local->queue)  // realloc() fails (handles memory overflow)
+                return NULL;
+        }
+    } else
+        local->sorted = 1;  // Queue of size 1 is always sorted
+    local->queue[local->count++] = (entry_t) {block, destructor};
+    return block;
+}
+void *coll_unqueue(void *block) {
+    if (depth && local->count) {
+        entry_t *queue = local->queue;
+
+        if (local->sorted != local->count) {
+            qsort(queue, local->count, sizeof(entry_t), cmpfunc);
+            local->sorted = local->count;
+        }
+        if ((queue = qsearch(queue, queue + local->count - 1, block))->block == block)
+            queue->block = NULL;    // Causes free() to take no action
     }
+    return block;
 }
