@@ -7,7 +7,7 @@
 #include <string.h>
 #include <threads.h>
 
-#include <ladle/common/impl.h>
+#include <ladle/common/lib.h>
 #include <ladle/common/ptrcmp.h>
 
 #include "collect.h"
@@ -16,8 +16,6 @@
 
 #define QUEUE_DEFCAP    4
 #define STACK_DEFCAP    8
-
-// ---- Globals ----
 
 typedef void (*dtor_t)(void *);
 typedef struct entry_t {
@@ -29,9 +27,11 @@ typedef struct gc_t {
     size_t capacity, count, sorted;
 } gc_t;
 
-thread_local void *__coll_cur;
-thread_local gc_t *stack, *local;
-thread_local size_t capacity, depth;
+// ---- Variables ----
+
+export thread_local void *_coll_cur;
+static thread_local gc_t *stack, *local;
+static thread_local size_t capacity, depth;
 
 // ---- Private Functions ----
 
@@ -68,12 +68,12 @@ static entry_t *qsearch(entry_t *min, entry_t *max, void *block) {
 }
 
 // Destructor that does nothing
-void __coll_blank(void *restrict block) {}
+export void _coll_blank(void *restrict block) {}
 
 /* Prepares local collector for use
  * Allocates memory for contents of local collector, and initially, the local buffer
  * Returns true on success and false on failure */
-bool __coll_ctor(void) {
+export bool _coll_ctor(void) {
     // If collector stack not initialized, initialize
     if (!depth) {
         stack = malloc((capacity = STACK_DEFCAP) * sizeof(gc_t));
@@ -104,7 +104,7 @@ bool __coll_ctor(void) {
 
 /* Frees memory queued to be freed
  * Frees contents of local collector, and intially, the local buffer */
-void __coll_dtor(void) {
+export void _coll_dtor(void) {
     entry_t cur;
 
     for (size_t i = 0, lim = local->count; i < lim; ++i) {
@@ -119,7 +119,7 @@ void __coll_dtor(void) {
 
 // ---- Public Functions ----
 
-void *coll_dqueue(void *block, dtor_t destructor) {
+export void *coll_dqueue(void *block, dtor_t destructor) {
     if (!depth) {
         puts("collect.h: Fatal error: No local collector initialized");
         exit(EXIT_FAILURE);
@@ -147,7 +147,7 @@ void *coll_dqueue(void *block, dtor_t destructor) {
     local->queue[local->count++] = (entry_t) {block, destructor};
     return block;
 }
-void *coll_unqueue(void *block) {
+export void *coll_unqueue(void *block) {
     if (depth && local->count) {
         entry_t *queue = local->queue;
 

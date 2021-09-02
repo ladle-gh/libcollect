@@ -8,11 +8,15 @@
 
 // ---- Implementation-Exclusive ----
 
-export extern thread_local void *__coll_cur;
+export extern thread_local void *_coll_cur;
 
-export void __coll_blank(void *block);
-export bool __coll_ctor(void);
-export void __coll_dtor(void);
+BEGIN
+
+export void _coll_blank(void *);
+export bool _coll_ctor(void);
+export void _coll_dtor(void);
+
+END
 
 // ---- End Implementation-Exclusive ----
 
@@ -20,17 +24,17 @@ export void __coll_dtor(void);
  * __VA_ARGS__ is the list of parameter variables
  * Sets errno accordingly on internal error */
 #define coll_init(type, function, ...)              \
-    if (function != __coll_cur && __coll_ctor()) {  \
-        __coll_cur = function;                      \
+    if (function != _coll_cur && _coll_ctor()) {    \
+        _coll_cur = function;                       \
         type __retval = function(__VA_ARGS__);      \
-        __coll_dtor();                              \
+        _coll_dtor();                               \
         return __retval;                            \
     }
 #define coll_nrinit(function, ...)                  \
-    if (function != __coll_cur && __coll_ctor()) {  \
-        __coll_cur = function;                      \
+    if (function != _coll_cur && _coll_ctor()) {    \
+        _coll_cur = function;                       \
         function(__VA_ARGS__);                      \
-        __coll_dtor();                              \
+        _coll_dtor();                               \
         return;                                     \
     }
 
@@ -49,7 +53,7 @@ export void __coll_dtor(void);
  * If NULL is passed, no action is taken
  * Returns NULL on internal error
  * Terminates program if coll_init() has not been called beforehand */
-#define coll_queue(block)   coll_dqueue(block, __coll_blank)
+#define coll_queue(block)   coll_dqueue(block, _coll_blank)
 
 BEGIN
 
